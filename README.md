@@ -1,83 +1,84 @@
-# SIEM (ELK) Entorno de Laboratorio
+# SIEM (OpenSearch) Entorno de Laboratorio
 
-Este proyecto despliega ELK (Elasticsearch, Logstash y Kibana) con Docker Compose en local para recibir y visualizar logs de seguridad. Soporta dos entradas de datos: TCP en tiempo real y carga desde archivos locales.
+Este proyecto despliega una arquitectura SIEM basada en OpenSearch para ingestar threat intelligence, correlacionar inicios de sesión y visualizar alertas. Incluye OpenSearch, OpenSearch Dashboards, Logstash y un demo-runner en Python.
 
 ## Requisitos
 - Docker
 - Docker Compose
 
-## Servicios y Puertos
-- Elasticsearch: http://localhost:9200
-- Kibana: http://localhost:5601
+## Contenedores y Función
+- opensearch: motor de búsqueda y almacenamiento de datos SIEM
+- dashboards: interfaz web para explorar índices y crear visualizaciones
+- logstash: ingesta de datos por TCP, archivos locales y threatfeed (Spamhaus DROP)
+- demo-runner: correlación de IPs contra threatfeed y escritura de alertas
+
+## Puertos
+- OpenSearch: http://localhost:9201
+- Dashboards: http://localhost:5602
 - Logstash TCP input: host 5001 → contenedor 5000
+- Logstash monitoring: http://localhost:9600
 
 ## Estructura de Carpetas
-- docker-compose.yml: orquestación de servicios ELK
+- docker-compose.yml: orquestación de servicios
 - logstash/pipeline/logstash.conf: pipeline de Logstash
-- datasets/: datasets locales (NDJSON, un JSON por línea)
+- datasets/: datasets locales (JSON, un objeto por línea)
+- siem-demo/: demo en Python
 
-## Pasos Realizados (registro)
-1. Definición de servicios ELK con Docker Compose (ES/Kibana/Logstash).
-2. Añadido input TCP en Logstash para escritura en tiempo real.
-3. Añadido input de archivos en Logstash para leer NDJSON desde datasets/.
-4. Habilitado JSON codec en el input de archivos para parseo directo.
-5. Añadido método de importación y verificación de datos reales de Suricata.
-
-## Despliegue e Inicio
+## Inicio rápido
 ```bash
 docker compose up -d
 ```
 
-Validación de servicios:
+Verificación rápida:
 ```bash
-curl -s http://localhost:9200 | head -n 5
+curl -s http://localhost:9201 | head -n 5
 ```
 
-## Añadir Datos (Método A: TCP en tiempo real)
-Adecuado para escritura temporal o importación en streaming.
+## Ingesta de datos con Logstash
+Logstash recibe datos de tres fuentes:
+1. TCP en tiempo real en el puerto 5001
+2. Archivos locales en datasets/*.json
+3. Threatfeed Spamhaus DROP vía http_poller cada minuto
 
+Ejemplo TCP:
 ```bash
-printf '{"@timestamp":"2026-02-10T10:00:00Z","event":"test","source":"manual","message":"hello elk"}\n' \
+printf '{"@timestamp":"2026-02-10T10:00:00Z","event":"test","source":"manual","message":"hello siem"}\n' \
 | nc -w 1 localhost 5001
 ```
 
-Verificación:
-```bash
-curl -s "http://localhost:9200/siem-*/_search?size=3" | head -n 40
-```
-
-## Añadir Datos (Método B: Importación desde archivos locales)
-1. Coloca NDJSON en el directorio datasets/ (un JSON por línea).
-2. Reinicia Logstash para activar la lectura de archivos:
-
+Ejemplo de recarga de archivos locales:
 ```bash
 docker compose up -d --force-recreate logstash
 ```
 
-## Importar Datos Reales (muestra de alertas Suricata)
-Descarga e importa 200 alertas de un dataset público (estructura real):  
-Fuente: https://github.com/FrankHassanabad/suricata-sample-data
+## Demo de correlación y alertas
+El demo-runner:
+- Lee threatfeed desde `threatfeed-*`
+- Lee login logs desde `login-logs`
+- Compara IPs contra rangos CIDR del threatfeed
+- Escribe alertas en `alerts`
 
+Para ejecutarlo manualmente:
 ```bash
-curl -L https://raw.githubusercontent.com/FrankHassanabad/suricata-sample-data/master/samples/wrccdc-2018/alerts-only.json \
-| python3 -c 'import sys,json,itertools; data=json.load(sys.stdin); \
-for obj in itertools.islice(data, 200): \
-    sys.stdout.write(json.dumps(obj)+"\n")' \
-| nc -w 2 localhost 5001
+docker compose up -d --force-recreate demo-runner
 ```
 
-Verificación:
-```bash
-curl -s "http://localhost:9200/siem-*/_search?size=3&q=event_type:alert" | head -n 40
-```
+Variables principales:
+- OPENSEARCH_URL
+- OPENSEARCH_THREAT_INDEX
+- OPENSEARCH_LOGIN_INDEX
+- OPENSEARCH_ALERT_INDEX
 
-## Visualización en Kibana
-1. Abre Kibana: http://localhost:5601  
-2. Crea Index Pattern: `siem-*`  
-3. Ejemplo de consulta KQL:  
-   - `event_type : "alert"`
+## Ver resultados en Dashboards
+1. Abre http://localhost:5602
+2. Crea index patterns:
+   - threatfeed-*
+   - login-logs
+   - alerts
+3. En Discover, selecciona `alerts` y ajusta el rango de tiempo a “Last 15 minutes”
 
-## Resumen del Pipeline de Logstash
-- Input TCP: escucha 5000 (contenedor) para eventos JSON Lines.
-- Input File: lee /data/*.json (mapeado desde datasets/).
-- Output: indexa en `siem-YYYY.MM.dd`.
+## Índices principales
+- threatfeed-YYYY.MM.dd: threat intelligence de Spamhaus
+- siem-YYYY.MM.dd: eventos generales recibidos por Logstash
+- login-logs: logs de inicio de sesión
+- alerts: alertas de correlación generadas por demo-runner

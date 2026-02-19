@@ -1,47 +1,77 @@
+version: "3.9"
+
 services:
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.12.2
-    container_name: siem-elasticsearch
+  opensearch:
+    image: opensearchproject/opensearch:2.12.0
+    container_name: siem-opensearch
     environment:
       - discovery.type=single-node
-      - xpack.security.enabled=false
-      - xpack.security.enrollment.enabled=false
-      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - plugins.security.disabled=true
+      - bootstrap.memory_lock=true
+      - OPENSEARCH_JAVA_OPTS=-Xms512m -Xmx512m
+      - OPENSEARCH_INITIAL_ADMIN_PASSWORD=ChangeMe123!
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
     ports:
-      - "9200:9200"
-      - "9300:9300"
+      - "9201:9200"
+      - "9601:9600"
     volumes:
-      - esdata:/usr/share/elasticsearch/data
+      - opensearchdata:/usr/share/opensearch/data
     networks:
       - siem-net
 
-  kibana:
-    image: docker.elastic.co/kibana/kibana:8.12.2
-    container_name: siem-kibana
+  dashboards:
+    image: opensearchproject/opensearch-dashboards:2.12.0
+    container_name: siem-opensearch-dashboards
     environment:
-      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - OPENSEARCH_HOSTS=["http://opensearch:9200"]
+      - DISABLE_SECURITY_DASHBOARDS_PLUGIN=true
     ports:
-      - "5601:5601"
+      - "5602:5601"
     depends_on:
-      - elasticsearch
+      - opensearch
+    networks:
+      - siem-net
+
+  demo-runner:
+    image: python:3.11-slim
+    container_name: siem-demo-runner
+    working_dir: /app
+    volumes:
+      - ./siem-demo:/app
+    environment:
+      - OPENSEARCH_URL=http://opensearch:9200
+      - OPENSEARCH_THREAT_INDEX=threatfeed-*
+      - OPENSEARCH_LOGIN_INDEX=login-logs
+      - OPENSEARCH_ALERT_INDEX=alerts
+    command: ["python", "match_threat.py"]
+    depends_on:
+      - opensearch
     networks:
       - siem-net
 
   logstash:
     image: docker.elastic.co/logstash/logstash:8.12.2
     container_name: siem-logstash
-    ports:
-      - "5001:5000"
+    environment:
+      - LS_JAVA_OPTS=-Xms256m -Xmx256m
+      - XPACK_MONITORING_ENABLED=false
     volumes:
       - ./logstash/pipeline:/usr/share/logstash/pipeline
       - ./datasets:/data
+    ports:
+      - "5001:5000"   # 可选：如果你要从外部发 tcp 日志进来
+      - "9600:9600"   # 可选：logstash 监控接口
     depends_on:
-      - elasticsearch
+      - opensearch
     networks:
       - siem-net
 
 volumes:
-  esdata:
+  opensearchdata:
 
 networks:
   siem-net:
+    driver: bridge

@@ -1,0 +1,32 @@
+[
+  {
+    "timestamp": "2026-02-19T09:13:21Z",
+    "user": "alice",
+    "source_ip": "203.0.113.10",
+    "event": "ssh_login"
+  },
+  {
+    "timestamp": "2026-02-19T09:15:07Z",
+    "user": "bob",
+    "source_ip": "10.0.0.12",
+    "event": "ssh_login"
+  },
+  {
+    "timestamp": "2026-02-19T09:18:45Z",
+    "user": "carol",
+    "source_ip": "198.51.100.23",
+    "event": "ssh_login"
+  },
+  {
+    "timestamp": "2026-02-19T09:21:02Z",
+    "user": "david",
+    "source_ip": "172.16.4.5",
+    "event": "ssh_login"
+  },
+  {
+    "timestamp": "2026-02-19T09:26:40Z",
+    "user": "erin",
+    "source_ip": "185.199.110.153",
+    "event": "ssh_login"
+  }
+]

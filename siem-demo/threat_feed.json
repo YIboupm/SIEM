@@ -1,0 +1,27 @@
+[
+  {
+    "ip": "203.0.113.10",
+    "type": "botnet",
+    "source": "OpenSearch"
+  },
+  {
+    "ip": "198.51.100.23",
+    "type": "bruteforce",
+    "source": "OpenSearch"
+  },
+  {
+    "ip": "192.0.2.45",
+    "type": "scanner",
+    "source": "OpenSearch"
+  },
+  {
+    "ip": "45.33.32.156",
+    "type": "c2",
+    "source": "OpenSearch"
+  },
+  {
+    "ip": "185.199.110.153",
+    "type": "phishing",
+    "source": "OpenSearch"
+  }
+]
