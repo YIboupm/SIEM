@@ -14,10 +14,13 @@ python3 match_threat.py
 ```
 
 ## OpenSearch Source
-Set OPENSEARCH_URL to read threatfeed from OpenSearch, match login IPs against threatfeed CIDR, and write alerts to OpenSearch.
+Set OPENSEARCH_URL to read threatfeed from Wazuh Indexer, match login IPs against threatfeed CIDR, and write alerts to OpenSearch.
 
 ```bash
-export OPENSEARCH_URL=http://localhost:9201
+export OPENSEARCH_URL=https://localhost:9201
+export OPENSEARCH_USERNAME=admin
+export OPENSEARCH_PASSWORD=SecretPassword
+export OPENSEARCH_SSL_VERIFY=false
 export OPENSEARCH_THREAT_INDEX="threatfeed-*"
 export OPENSEARCH_LOGIN_INDEX="login-logs"
 export OPENSEARCH_ALERT_INDEX="alerts"

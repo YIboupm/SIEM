@@ -3,6 +3,8 @@ import os
 import urllib.request
 import urllib.error
 import ipaddress
+import base64
+import ssl
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -18,16 +20,16 @@ def normalize_ip(value):
     return str(value).strip()
 
 
-def fetch_json(url, method="GET", body=None, headers=None):
+def fetch_json(url, method="GET", body=None, headers=None, ssl_context=None):
     request = urllib.request.Request(url, data=body, method=method)
     if headers:
         for key, value in headers.items():
             request.add_header(key, value)
-    with urllib.request.urlopen(request, timeout=20) as response:
+    with urllib.request.urlopen(request, timeout=20, context=ssl_context) as response:
         return json.loads(response.read().decode("utf-8"))
 
 
-def scroll_search(base_url, index, query, source_includes, size=1000, max_docs=20000):
+def scroll_search(base_url, index, query, source_includes, size=1000, max_docs=20000, headers=None, ssl_context=None):
     url = f"{base_url}/{index}/_search?scroll=1m"
     body = json.dumps(
         {
@@ -38,7 +40,13 @@ def scroll_search(base_url, index, query, source_includes, size=1000, max_docs=2
         }
     ).encode("utf-8")
     try:
-        data = fetch_json(url, method="POST", body=body, headers={"Content-Type": "application/json"})
+        data = fetch_json(
+            url,
+            method="POST",
+            body=body,
+            headers=headers,
+            ssl_context=ssl_context,
+        )
     except urllib.error.URLError:
         return []
     hits = data.get("hits", {}).get("hits", [])
@@ -50,7 +58,8 @@ def scroll_search(base_url, index, query, source_includes, size=1000, max_docs=2
             f"{base_url}/_search/scroll",
             method="POST",
             body=body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
+            ssl_context=ssl_context,
         )
         scroll_id = data.get("_scroll_id")
         hits = data.get("hits", {}).get("hits", [])
@@ -130,22 +139,26 @@ def extract_user(doc):
     return user
 
 
-def load_threatfeed(opensearch_url, index_pattern):
+def load_threatfeed(opensearch_url, index_pattern, headers=None, ssl_context=None):
     hits = scroll_search(
         opensearch_url,
         index_pattern,
         {"match_all": {}},
         ["indicator", "ip", "message"],
+        headers=headers,
+        ssl_context=ssl_context,
     )
     return [hit.get("_source", {}) for hit in hits]
 
 
-def load_login_logs(opensearch_url, index_pattern):
+def load_login_logs(opensearch_url, index_pattern, headers=None, ssl_context=None):
     hits = scroll_search(
         opensearch_url,
         index_pattern,
         {"match_all": {}},
         ["source_ip", "src_ip", "source", "source.ip", "timestamp", "@timestamp", "user", "event"],
+        headers=headers,
+        ssl_context=ssl_context,
     )
     return [hit.get("_source", {}) for hit in hits]
 
@@ -180,7 +193,7 @@ def find_match(ip_value, networks):
     return None
 
 
-def bulk_index(base_url, index_name, documents):
+def bulk_index(base_url, index_name, documents, headers=None, ssl_context=None):
     if not documents:
         return 0
     lines = []
@@ -188,15 +201,35 @@ def bulk_index(base_url, index_name, documents):
         lines.append(json.dumps({"index": {"_index": index_name}}, ensure_ascii=False))
         lines.append(json.dumps(doc, ensure_ascii=False))
     body = ("\n".join(lines) + "\n").encode("utf-8")
+    request_headers = {"Content-Type": "application/x-ndjson"}
+    if headers:
+        request_headers.update(headers)
     data = fetch_json(
         f"{base_url}/_bulk?refresh=true",
         method="POST",
         body=body,
-        headers={"Content-Type": "application/x-ndjson"},
+        headers=request_headers,
+        ssl_context=ssl_context,
     )
     if data.get("errors"):
         raise RuntimeError("Bulk index errors returned by OpenSearch.")
     return len(documents)
+
+def build_auth_headers(username, password):
+    if not username or not password:
+        return {"Content-Type": "application/json"}
+    token = base64.b64encode(f"{username}:{password}".encode("utf-8")).decode("utf-8")
+    return {"Content-Type": "application/json", "Authorization": f"Basic {token}"}
+
+
+def build_ssl_context(verify_ssl):
+    if verify_ssl:
+        return None
+    context = ssl.create_default_context()
+    context.check_hostname = False
+    context.verify_mode = ssl.CERT_NONE
+    return context
+
 
 def synthesize_login_logs(threat_networks, count=5):
     logs = []
@@ -227,14 +260,19 @@ def main():
     threat_index = os.getenv("OPENSEARCH_THREAT_INDEX", "threatfeed-*")
     login_index = os.getenv("OPENSEARCH_LOGIN_INDEX", "login-logs")
     alert_index = os.getenv("OPENSEARCH_ALERT_INDEX", "alerts")
+    opensearch_username = os.getenv("OPENSEARCH_USERNAME")
+    opensearch_password = os.getenv("OPENSEARCH_PASSWORD")
+    verify_ssl = os.getenv("OPENSEARCH_SSL_VERIFY", "true").lower() in {"1", "true", "yes"}
     use_local_logs = os.getenv("USE_LOCAL_LOGS", "false").lower() in {"1", "true", "yes"}
 
     threat_feed = []
     login_logs = []
     if opensearch_url:
-        threat_feed = load_threatfeed(opensearch_url, threat_index)
+        headers = build_auth_headers(opensearch_username, opensearch_password)
+        ssl_context = build_ssl_context(verify_ssl)
+        threat_feed = load_threatfeed(opensearch_url, threat_index, headers=headers, ssl_context=ssl_context)
         if not use_local_logs:
-            login_logs = load_login_logs(opensearch_url, login_index)
+            login_logs = load_login_logs(opensearch_url, login_index, headers=headers, ssl_context=ssl_context)
         if not login_logs and login_logs_path.exists():
             login_logs = load_json(login_logs_path)
     else:
@@ -265,7 +303,7 @@ def main():
     if not alerts and opensearch_url and threat_networks:
         login_logs = synthesize_login_logs(threat_networks, count=5)
         try:
-            bulk_index(opensearch_url, login_index, login_logs)
+            bulk_index(opensearch_url, login_index, login_logs, headers=headers, ssl_context=ssl_context)
             print(f"Seeded login logs: {len(login_logs)}")
         except Exception as exc:
             print(f"Login log seed failed: {exc}")
@@ -294,7 +332,7 @@ def main():
 
     if opensearch_url:
         try:
-            indexed = bulk_index(opensearch_url, alert_index, alerts)
+            indexed = bulk_index(opensearch_url, alert_index, alerts, headers=headers, ssl_context=ssl_context)
             print(f"Indexed alerts to OpenSearch: {indexed}")
         except Exception as exc:
             print(f"Alert indexing failed: {exc}")

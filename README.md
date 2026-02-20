@@ -1,38 +1,54 @@
-# SIEM (OpenSearch) Entorno de Laboratorio
+# SIEM (Wazuh) Entorno de Laboratorio
 
-Este proyecto despliega una arquitectura SIEM basada en OpenSearch para ingestar threat intelligence, correlacionar inicios de sesión y visualizar alertas. Incluye OpenSearch, OpenSearch Dashboards, Logstash y un demo-runner en Python.
+Este proyecto despliega una arquitectura SIEM basada en Wazuh. Incluye Wazuh Manager, Wazuh Indexer, Wazuh Dashboard, Logstash y un demo-runner en Python para correlación de IPs.
 
 ## Requisitos
 - Docker
 - Docker Compose
 
-## Contenedores y Función
-- opensearch: motor de búsqueda y almacenamiento de datos SIEM
-- dashboards: interfaz web para explorar índices y crear visualizaciones
+## Contenedores y función
+- wazuh.manager: análisis de eventos, reglas y gestión de agentes
+- wazuh.indexer: almacenamiento e indexación de datos (basado en OpenSearch)
+- wazuh.dashboard: interfaz web para búsqueda, visualización y app de Wazuh
 - logstash: ingesta de datos por TCP, archivos locales y threatfeed (Spamhaus DROP)
 - demo-runner: correlación de IPs contra threatfeed y escritura de alertas
 
 ## Puertos
-- OpenSearch: http://localhost:9201
-- Dashboards: http://localhost:5602
+- Wazuh Indexer (HTTPS): https://localhost:9201
+- Wazuh Dashboard (HTTPS): https://localhost:5602
+- Wazuh Manager API: https://localhost:55000
+- Wazuh Agent: 1514/tcp, 1515/tcp, 514/udp
 - Logstash TCP input: host 5001 → contenedor 5000
 - Logstash monitoring: http://localhost:9600
 
-## Estructura de Carpetas
+## Estructura de carpetas
 - docker-compose.yml: orquestación de servicios
+- generate-indexer-certs.yml: generación de certificados
+- config/: configuración de Wazuh Indexer y Dashboard
 - logstash/pipeline/logstash.conf: pipeline de Logstash
 - datasets/: datasets locales (JSON, un objeto por línea)
 - siem-demo/: demo en Python
 
 ## Inicio rápido
+1) Genera certificados:
+```bash
+docker compose -f generate-indexer-certs.yml run --rm generator
+```
+
+2) Levanta los servicios:
 ```bash
 docker compose up -d
 ```
 
 Verificación rápida:
 ```bash
-curl -s http://localhost:9201 | head -n 5
+curl -k -u admin:SecretPassword https://localhost:9201 | head -n 5
 ```
+
+## Acceso a Wazuh Dashboard
+- URL: https://localhost:5602
+- Usuario: admin
+- Contraseña: SecretPassword
 
 ## Ingesta de datos con Logstash
 Logstash recibe datos de tres fuentes:
@@ -46,7 +62,7 @@ printf '{"@timestamp":"2026-02-10T10:00:00Z","event":"test","source":"manual","m
 | nc -w 1 localhost 5001
 ```
 
-Ejemplo de recarga de archivos locales:
+Recarga de archivos locales:
 ```bash
 docker compose up -d --force-recreate logstash
 ```
@@ -58,19 +74,22 @@ El demo-runner:
 - Compara IPs contra rangos CIDR del threatfeed
 - Escribe alertas en `alerts`
 
-Para ejecutarlo manualmente:
+Ejecución manual:
 ```bash
 docker compose up -d --force-recreate demo-runner
 ```
 
 Variables principales:
 - OPENSEARCH_URL
+- OPENSEARCH_USERNAME
+- OPENSEARCH_PASSWORD
+- OPENSEARCH_SSL_VERIFY
 - OPENSEARCH_THREAT_INDEX
 - OPENSEARCH_LOGIN_INDEX
 - OPENSEARCH_ALERT_INDEX
 
-## Ver resultados en Dashboards
-1. Abre http://localhost:5602
+## Ver resultados en Dashboard
+1. Abre https://localhost:5602
 2. Crea index patterns:
    - threatfeed-*
    - login-logs
