@@ -98,40 +98,16 @@ services:
     depends_on:
       - wazuh.indexer
 
-  demo-runner:
-    image: python:3.11-slim
-    container_name: siem-demo-runner
-    working_dir: /app
-    volumes:
-      - ./siem-demo:/app
+  wazuh.agent:
+    image: wazuh/wazuh-agent:4.14.3
+    container_name: wazuh-agent
+    hostname: wazuh.agent
+    restart: always
     environment:
-      - OPENSEARCH_URL=https://wazuh.indexer:9200
-      - OPENSEARCH_USERNAME=admin
-      - OPENSEARCH_PASSWORD=SecretPassword
-      - OPENSEARCH_SSL_VERIFY=false
-      - OPENSEARCH_THREAT_INDEX=threatfeed-*
-      - OPENSEARCH_LOGIN_INDEX=login-logs
-      - OPENSEARCH_ALERT_INDEX=alerts
-    command: ["python", "match_threat.py"]
+      - WAZUH_MANAGER_SERVER=wazuh.manager
+      - WAZUH_AGENT_NAME=docker-agent-1
     depends_on:
-      - wazuh.indexer
-
-  logstash:
-    image: docker.elastic.co/logstash/logstash:8.12.2
-    container_name: siem-logstash
-    environment:
-      - LS_JAVA_OPTS=-Xms256m -Xmx256m
-      - XPACK_MONITORING_ENABLED=false
-      - OPENSEARCH_USERNAME=admin
-      - OPENSEARCH_PASSWORD=SecretPassword
-    volumes:
-      - ./logstash/pipeline:/usr/share/logstash/pipeline
-      - ./datasets:/data
-    ports:
-      - "5001:5000"
-      - "9600:9600"
-    depends_on:
-      - wazuh.indexer
+      - wazuh.manager
 
 volumes:
   wazuh_api_configuration:
