@@ -1,0 +1,16 @@
+<group name="threatfeed,">
+  <rule id="100200" level="14">
+    <if_group>sshd</if_group>
+    <match>Accepted password</match>
+    <list field="srcip" lookup="address_match_key">etc/lists/malicious-ioc/malicious-ip</list>
+    <description>Threatfeed match from malicious IP list (SSH success)</description>
+    <group>threatfeed,spamhaus,ssh,</group>
+  </rule>
+  <rule id="100201" level="10">
+    <if_group>sshd</if_group>
+    <match>Failed password</match>
+    <list field="srcip" lookup="address_match_key">etc/lists/malicious-ioc/malicious-ip</list>
+    <description>Threatfeed match from malicious IP list (SSH failure)</description>
+    <group>threatfeed,spamhaus,ssh,</group>
+  </rule>
+</group>

@@ -1,58 +1,134 @@
-# SIEM (Wazuh) Entorno de Laboratorio
+# Laboratorio SIEM con Wazuh (Docker)
 
-Este proyecto despliega una arquitectura SIEM basada en Wazuh. Incluye Wazuh Manager, Wazuh Indexer, Wazuh Dashboard y un agente Wazuh para recolección de datos reales de endpoint.
+Este proyecto despliega un laboratorio SIEM de 3 nodos lógicos con Docker:
+
+- `siem-server`: `wazuh.manager` + `wazuh.indexer` + `wazuh.dashboard`
+- `victim`: `Wazuh agent` + `Snort` + `Zeek`
+- `attacker`: generación de tráfico y simulación de ataque
+
+Todo corre dentro de la misma red Docker para validar el flujo completo:
+**ataque -> detección -> recolección de logs -> análisis SIEM**.
+
+## Arquitectura
+
+```mermaid
+flowchart LR
+    A[attacker<br/>nmap/ping/curl] -->|Tráfico de red| V[victim<br/>Snort + Zeek + Wazuh agent]
+    V -->|Logs del host y red| M[wazuh.manager]
+    M -->|Alertas| I[wazuh.indexer]
+    D[wazuh.dashboard] -->|Consultas/visualización| I
+    D -->|API| M
+```
 
 ## Requisitos
+
 - Docker
 - Docker Compose
 
-## Contenedores y función
-- wazuh.manager: análisis de eventos, reglas y gestión de agentes
-- wazuh.indexer: almacenamiento e indexación de datos (basado en OpenSearch)
-- wazuh.dashboard: interfaz web para búsqueda, visualización y app de Wazuh
-- wazuh.agent: agente que recolecta datos reales y los envía al manager
+> En Apple Silicon (M1/M2/M3), `victim` y `attacker` usan `linux/amd64` para compatibilidad con Zeek.  
+> Zeek se instala desde su repositorio oficial OBS dentro de `victim`.
 
-## Puertos
-- Wazuh Indexer (HTTPS): https://localhost:9201
-- Wazuh Dashboard (HTTPS): https://localhost:5602
-- Wazuh Manager API: https://localhost:55000
-- Wazuh Agent: 1514/tcp, 1515/tcp, 514/udp
+## Puertos expuestos
 
-## Estructura de carpetas
-- docker-compose.yml: orquestación de servicios
-- generate-indexer-certs.yml: generación de certificados
-- config/: configuración de Wazuh Indexer y Dashboard
+- Dashboard: `https://localhost:5602`
+- Indexer: `https://localhost:9201`
+- API Manager: `https://localhost:55000`
+- Servicio HTTP de victim: `http://localhost:8081`
 
-## Inicio rápido
-1) Genera certificados:
+## Arranque del entorno
+
+1. Generar certificados del indexer:
+
 ```bash
 docker compose -f generate-indexer-certs.yml run --rm generator
 ```
 
-2) Levanta los servicios:
+2. Levantar servicios:
+
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 
-Verificación rápida:
+3. Verificar estado:
+
 ```bash
-curl -k -u admin:SecretPassword https://localhost:9201 | head -n 5
+docker compose ps
 ```
 
-## Acceso a Wazuh Dashboard
-- URL: https://localhost:5602
-- Usuario: admin
-- Contraseña: SecretPassword
+## Simulación de ataque (básica)
 
-## Recolección real con Wazuh Agent
-El agente incluido se registra en el manager y envía eventos reales del endpoint del contenedor. En el dashboard puedes ver el agente en Agent management.
+Ejecuta tráfico de prueba desde `attacker` hacia `victim`:
 
-## Ver resultados en Dashboard
-1. Abre https://localhost:5602
-2. Entra en la app de Wazuh y revisa Agent management
-3. En Discover, usa el patrón `wazuh-alerts-*` para ver alertas reales
+```bash
+docker compose exec attacker /usr/local/bin/attack-simulate.sh victim 8080
+```
 
-## Índices principales
-- wazuh-alerts-4.x-YYYY.MM.dd: alertas generadas por Wazuh
-- wazuh-monitoring-*: métricas de Wazuh
-- wazuh-statistics-*: estadísticas del manager
+Incluye:
+- ICMP (`ping`)
+- Escaneo TCP (`nmap`)
+- Ráfaga HTTP (`curl`)
+
+## Simulación de cadena de ataque (completa)
+
+Script integral que:
+1) ejecuta la simulación de red, y  
+2) inyecta eventos SSH reales para validar reglas threatfeed.
+
+```bash
+./scripts/run-attack-chain.sh
+```
+
+Opcionalmente:
+
+```bash
+./scripts/run-attack-chain.sh victim 8080 196.251.85.62
+```
+
+## Validación técnica (comandos)
+
+Ver logs del `victim`:
+
+```bash
+docker compose logs victim --tail=120
+```
+
+Ver logs del manager:
+
+```bash
+docker compose logs wazuh.manager --tail=200
+```
+
+Listar agentes registrados:
+
+```bash
+docker compose exec wazuh.manager /var/ossec/bin/agent_control -l
+```
+
+## Validación en Dashboard
+
+- URL: `https://localhost:5602`
+- Usuario: `admin`
+- Contraseña: `SecretPassword`
+
+En `Discover` (índice `wazuh-alerts-*`), usa estas consultas:
+
+```text
+agent.name:"victim-agent"
+```
+
+```text
+decoder.name:snort
+```
+
+```text
+rule.id:(100200 OR 100201)
+```
+
+## Reglas threatfeed personalizadas
+
+Archivo: `config/wazuh_manager/rules/threatfeed_rules.xml`
+
+- `100200` (nivel 14): IP maliciosa + `Accepted password` en SSH
+- `100201` (nivel 10): IP maliciosa + `Failed password` en SSH
+
+Esto permite demostrar alertas de severidad alta y media basadas en IOC local (`malicious-ip`).
