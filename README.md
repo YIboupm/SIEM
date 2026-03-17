@@ -84,6 +84,20 @@ Opcionalmente:
 ./scripts/run-attack-chain.sh victim 8080 196.251.85.62
 ```
 
+## Prueba específica de Zeek
+
+Este script valida si Zeek está funcionando y escribiendo logs (`conn.log`, `http.log`, `notice.log`):
+
+```bash
+./scripts/test-zeek.sh
+```
+
+Con parámetros opcionales:
+
+```bash
+./scripts/test-zeek.sh victim 8080 6
+```
+
 ## Validación técnica (comandos)
 
 Ver logs del `victim`:
@@ -118,6 +132,10 @@ agent.name:"victim-agent"
 
 ```text
 decoder.name:snort
+```
+
+```text
+location:"/var/log/zeek/logs/current/notice.log"
 ```
 
 ```text
