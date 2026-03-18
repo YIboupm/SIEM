@@ -55,6 +55,14 @@ docker compose up -d --build
 docker compose ps
 ```
 
+> Si cambias `docker-compose.yml` (por ejemplo, nuevos volúmenes para reglas/decoders), aplica:
+>
+> ```bash
+> docker compose up -d wazuh.manager
+> ```
+>
+> `restart` no siempre aplica cambios de montajes.
+
 ## Simulación de ataque (básica)
 
 Ejecuta tráfico de prueba desde `attacker` hacia `victim`:
@@ -86,7 +94,7 @@ Opcionalmente:
 
 ## Prueba específica de Zeek
 
-Este script valida si Zeek está funcionando y escribiendo logs (`conn.log`, `http.log`, `notice.log`):
+Este script valida si Zeek está funcionando y escribiendo logs (`conn.log`, `http.log`, `notice.log`) y además fuerza eventos puente para visualización en Wazuh:
 
 ```bash
 ./scripts/test-zeek.sh
@@ -135,11 +143,19 @@ decoder.name:snort
 ```
 
 ```text
-location:"/var/log/zeek/logs/current/notice.log"
+rule.id:(100200 OR 100201)
 ```
 
 ```text
-rule.id:(100200 OR 100201)
+decoder.name:"zeek-wazuh"
+```
+
+```text
+rule.id:(100300 OR 100301 OR 100302 OR 100303)
+```
+
+```text
+location:"/var/log/zeek/zeek-wazuh.log"
 ```
 
 ## Reglas threatfeed personalizadas
@@ -150,3 +166,27 @@ Archivo: `config/wazuh_manager/rules/threatfeed_rules.xml`
 - `100201` (nivel 10): IP maliciosa + `Failed password` en SSH
 
 Esto permite demostrar alertas de severidad alta y media basadas en IOC local (`malicious-ip`).
+
+## Parser/Reglas Zeek personalizadas para Dashboard
+
+Archivos:
+
+- `config/wazuh_manager/decoders/zeek_decoders.xml`
+- `config/wazuh_manager/rules/zeek_dashboard_rules.xml`
+
+IDs de reglas:
+
+- `100300`: evento Zeek ingerido por el puente `zeek-wazuh`
+- `100301`: evento HTTP detectado (`GET`)
+- `100302`: conexión hacia puerto `8080`
+- `100303`: HTTP con `curl` user-agent
+
+Objetivo: asegurar visualización de eventos Zeek en Dashboard sin depender de parsers externos.
+
+## Troubleshooting rápido
+
+- API en `Offline` dentro de Dashboard:
+  1) `docker compose ps`  
+  2) `docker compose logs wazuh.manager --tail=200`  
+  3) `docker compose up -d wazuh.manager`  
+  4) En Dashboard: `Server APIs -> Check connection -> Refresh`
