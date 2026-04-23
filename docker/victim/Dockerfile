@@ -42,6 +42,7 @@ RUN curl -fsSL https://download.opensuse.org/repositories/security:zeek/xUbuntu_
     && apt-get install -y --no-install-recommends zeek \
     && rm -rf /var/lib/apt/lists/*
 
+COPY docker/victim/snort-lab-chain.rules /etc/snort/rules/lab-chain.rules
 COPY docker/victim/victim-entrypoint.sh /usr/local/bin/victim-entrypoint.sh
 RUN chmod +x /usr/local/bin/victim-entrypoint.sh
 

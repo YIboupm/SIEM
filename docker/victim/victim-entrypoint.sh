@@ -26,7 +26,17 @@ append_localfile() {
 }
 
 touch /var/log/auth.log
-append_localfile "/var/log/snort/alert" "snort-alerts" "syslog"
+# Keep exactly one snort localfile block and parse fast alerts with snort-full.
+python3 - <<'PY'
+from pathlib import Path
+import re
+path = Path("/var/ossec/etc/ossec.conf")
+text = path.read_text()
+pattern = re.compile(r"<localfile>\s*<log_format>[^<]+</log_format>\s*<location>/var/log/snort/alert</location>\s*<alias>snort-alerts</alias>\s*</localfile>\s*", re.MULTILINE)
+text = pattern.sub("", text)
+path.write_text(text)
+PY
+append_localfile "/var/log/snort/alert" "snort-alerts" "snort-full"
 append_localfile "/var/log/zeek/current/notice.log" "zeek-notice" "syslog"
 append_localfile "/var/log/zeek/current/conn.log" "zeek-conn" "syslog"
 append_localfile "/var/log/zeek/current/http.log" "zeek-http" "syslog"
@@ -59,14 +69,22 @@ enroll_agent_with_retry() {
 
 /var/ossec/bin/wazuh-control start
 
+if [ -f /etc/snort/rules/local.rules ] && [ -f /etc/snort/rules/lab-chain.rules ] \
+  && ! grep -q "sid:1010101" /etc/snort/rules/local.rules; then
+  cat /etc/snort/rules/lab-chain.rules >> /etc/snort/rules/local.rules
+fi
+
 if [ -f /etc/snort/rules/local.rules ] && ! grep -q "sid:1000001" /etc/snort/rules/local.rules; then
   cat <<'EOF' >> /etc/snort/rules/local.rules
-alert icmp any any -> any any (msg:"ICMP test traffic detected"; sid:1000001; rev:1;)
-alert tcp any any -> any 8080 (msg:"HTTP request detected on victim"; sid:1000002; rev:1;)
+alert icmp any any -> any any (msg:"ICMP test traffic detected"; sid:1000001; rev:1; classtype:misc-activity;)
+alert tcp any any -> any 8080 (msg:"HTTP request detected on victim"; sid:1000002; rev:1; classtype:misc-activity;)
 EOF
 fi
 
-snort -i "${MONITOR_INTERFACE}" -A fast -q -c /etc/snort/snort.conf -l /var/log/snort \
+# -k none: skip checksum validation. Docker bridges deliver packets with
+# TCP checksum offload delegated to hardware -> Snort would drop them otherwise
+# and real HTTP traffic (curl) would not trigger any rule beyond the SYN phase.
+snort -i "${MONITOR_INTERFACE}" -A fast -k none -q -c /etc/snort/snort.conf -l /var/log/snort \
   >/var/log/snort/snort.stdout.log 2>/var/log/snort/snort.stderr.log &
 ZEEK_BIN="$(command -v zeek || true)"
 if [ -z "${ZEEK_BIN}" ] && [ -x /opt/zeek/bin/zeek ]; then

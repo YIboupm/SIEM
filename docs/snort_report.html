@@ -1,0 +1,447 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>SIEM Lab — Snort 部分实验报告</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm; }
+  html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+  body {
+    font-family: "PingFang SC", "Heiti SC", "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+    color: #1f2328;
+    font-size: 11pt;
+    line-height: 1.55;
+  }
+  h1 { font-size: 20pt; border-bottom: 2px solid #1f6feb; padding-bottom: 4pt; margin-top: 0; }
+  h2 { font-size: 14pt; color: #0550ae; border-left: 4px solid #1f6feb; padding-left: 8pt; margin-top: 22pt; }
+  h3 { font-size: 12pt; color: #24292f; margin-top: 16pt; }
+  p, li { text-align: justify; }
+  code, pre { font-family: "JetBrains Mono", "Menlo", "Consolas", monospace; font-size: 9.5pt; }
+  code { background: #f3f4f6; padding: 1px 4px; border-radius: 3px; color: #0a3069; }
+  pre {
+    background: #0d1117; color: #e6edf3; padding: 10pt 12pt; border-radius: 6pt;
+    overflow-x: auto; white-space: pre; font-size: 8.8pt; line-height: 1.45;
+    page-break-inside: avoid;
+  }
+  pre .kw { color: #ff7b72; }
+  pre .str { color: #a5d6ff; }
+  pre .cmt { color: #8b949e; font-style: italic; }
+  pre .fn { color: #d2a8ff; }
+  pre .num { color: #79c0ff; }
+  table { border-collapse: collapse; width: 100%; margin: 8pt 0; font-size: 10pt; }
+  th, td { border: 1px solid #d0d7de; padding: 5pt 7pt; vertical-align: top; }
+  th { background: #eff6ff; color: #0550ae; text-align: left; }
+  tr:nth-child(even) td { background: #f6f8fa; }
+  .path { background: #fff8c5; padding: 1px 4px; border-radius: 3px; font-family: Menlo, monospace; font-size: 10pt; }
+  .note { background: #fff4e5; border-left: 4px solid #fb8500; padding: 6pt 10pt; margin: 8pt 0; font-size: 10pt; }
+  .ok { color: #116329; font-weight: 600; }
+  .warn { color: #9a6700; font-weight: 600; }
+  ul { padding-left: 18pt; }
+  .toc { background: #f6f8fa; border: 1px solid #d0d7de; border-radius: 6pt; padding: 10pt 14pt; margin-bottom: 16pt; font-size: 10pt; }
+  .toc ol { margin: 4pt 0 0 18pt; padding: 0; }
+  .meta { color: #57606a; font-size: 10pt; margin-bottom: 10pt; }
+  .caption { font-size: 9.5pt; color: #57606a; margin-top: -4pt; margin-bottom: 8pt; }
+  hr { border: none; border-top: 1px solid #d0d7de; margin: 18pt 0; }
+</style>
+</head>
+<body>
+
+<h1>SIEM Lab — Snort 部分实验报告</h1>
+<div class="meta">
+  项目仓库根目录：<span class="path">/Users/liangyibo/Desktop/SIEM</span><br/>
+  目标：在 Docker 化的 Wazuh SIEM 实验环境中，基于 Snort 实现网络层多阶段攻击检测，并在 Wazuh 端进行关联、升级到 HIGH / CRITICAL 级别告警。
+</div>
+
+<div class="toc">
+<strong>目录</strong>
+<ol>
+  <li>实验目标与总体架构</li>
+  <li>攻击场景与杀伤链（Kill-Chain）设计</li>
+  <li>Snort 规则链（SIDs 1010101–1010105）</li>
+  <li>Wazuh 侧规则：阶段标记与跨阶段关联</li>
+  <li>修改清单（文件与组件）</li>
+  <li>端到端运行流程（实验步骤）</li>
+  <li>在 Wazuh Dashboard 中的验证查询</li>
+  <li>问题与排错记录</li>
+</ol>
+</div>
+
+<h2>1. 实验目标与总体架构</h2>
+
+<p>实验在一个单主机 Docker 环境中复现完整的 SIEM 处理链条：<strong>攻击流量 → Snort 网络层检测 → Wazuh 代理采集 → Wazuh 管理端规则引擎与关联 → 在 Wazuh Dashboard 中可视化</strong>。集群分为三个逻辑节点：</p>
+
+<ul>
+  <li><strong>siem-server</strong>：容器 <code>wazuh.manager</code>、<code>wazuh.indexer</code>、<code>wazuh.dashboard</code>（镜像版本 4.14.3）。</li>
+  <li><strong>victim</strong>：容器内并行运行 <code>Wazuh agent</code>、<code>Snort</code>（嗅探 <code>eth0</code>）与一个最小化的 HTTP 服务（Python <code>http.server</code>，端口 8080）。</li>
+  <li><strong>attacker</strong>：容器，预装 <code>ping</code> / <code>nmap</code> / <code>curl</code>，用于生成攻击流量。</li>
+</ul>
+
+<p>三者位于同一 Docker bridge 网络 <code>siem-lab-net</code>，因此 <code>attacker → victim</code> 的流量会被 victim 容器内 Snort 嗅探到，alert 写入 <code>/var/log/snort/alert</code>；Wazuh agent 以 <code>snort-full</code> 格式读取后经 <code>1514/tcp</code> 上送到 manager。</p>
+
+<h2>2. 攻击场景与杀伤链设计</h2>
+
+<p>为了让规则链本身<strong>具有逻辑</strong>（而非罗列互不相关的探测），场景按 MITRE ATT&amp;CK 的阶段组织成一条外部攻击者针对 Web 服务的杀伤链：</p>
+
+<table>
+<thead><tr><th>阶段</th><th>MITRE 阶段</th><th>攻击流量</th><th>Snort SID</th><th>Wazuh tag 规则</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Reconnaissance (TA0043)</td><td><code>ping -c 3 victim</code></td><td><code>1010101</code></td><td><code>100360</code> (level 5)</td></tr>
+<tr><td>2</td><td>Discovery / Active Scanning (T1046)</td><td><code>nmap -sS -p 22,80,445,3306,8080</code></td><td><code>1010102</code></td><td><code>100361</code> (level 6)</td></tr>
+<tr><td>3</td><td>Initial Access — Web probe (T1190)</td><td><code>curl /admin</code> 等敏感路径</td><td><code>1010103</code></td><td><code>100362</code> (level 8)</td></tr>
+<tr><td>4</td><td>Exploitation — SQLi / LFI</td><td><code>?q=' OR 1=1</code>、<code>?path=../../etc/passwd</code></td><td><code>1010104</code></td><td><code>100363</code> (level 10)</td></tr>
+<tr><td>5</td><td>Exfiltration / C2</td><td><code>POST</code> + UA <code>python-requests</code></td><td><code>1010105</code></td><td><code>100364</code> (level 11)</td></tr>
+</tbody>
+</table>
+
+<p>在 Wazuh 端再做一次<strong>跨阶段关联</strong>（同源 IP，窗口 600 s）：</p>
+<table>
+<thead><tr><th>Wazuh 规则</th><th>条件</th><th>级别</th><th>Dashboard 严重度</th></tr></thead>
+<tbody>
+<tr><td><code>100390</code></td><td>≥ 3 个 <code>snort_lab_chain</code> 事件</td><td>12</td><td><span class="warn">HIGH</span></td></tr>
+<tr><td><code>100391</code></td><td>≥ 5 个 <code>snort_lab_chain</code> 事件（完整链）</td><td>15</td><td><span style="color:#cf222e;font-weight:600;">CRITICAL</span></td></tr>
+</tbody>
+</table>
+
+<h2>3. Snort 规则链（<span class="path">docker/victim/snort-lab-chain.rules</span>）</h2>
+
+<p>该文件是本实验自写的规则集合（五条规则，SID <code>1010101</code>–<code>1010105</code>，<code>rev:11</code>）。HTTP 相关的三条规则使用 Snort 2.9 的 <code>http_inspect</code> 预处理器修饰符（<code>http_uri</code> / <code>http_method</code> / <code>/H</code>），以便在 <code>HTTP_PORTS</code>（含 8080）上对规范化后的 URI / 方法 / 头部进行匹配。</p>
+
+<pre># =============================================================================
+# SIEM lab — Snort rule chain coherente (kill-chain externo contra victim)
+# SIDs 1010101..1010105 (una etapa cada uno). rev:11
+# Narrativa:
+#   1. Recon      -> ping sweep            (ICMP echo)
+#   2. Scan       -> multi-port SYN        (22,80,445,3306,8080)
+#   3. Web probe  -> rutas sensibles       (/admin, /login, /.env, ...)
+#   4. Exploit    -> payload SQLi / LFI    (UNION SELECT, 1=1, ../, /etc/passwd)
+#   5. Exfil/C2   -> POST con UA de automatización (python-requests, sqlmap...)
+# =============================================================================
+
+alert icmp any any -> $HOME_NET any (msg:"LAB Stage1 Reconnaissance: ICMP echo probe";
+  itype:8; icode:0; sid:1010101; rev:11; classtype:misc-activity; priority:3;)
+
+alert tcp any any -> $HOME_NET [22,80,445,3306,8080]
+  (msg:"LAB Stage2 Service Discovery: SYN probe on well-known port";
+   flags:S,12; sid:1010102; rev:11; classtype:attempted-recon; priority:3;)
+
+alert tcp any any -> $HOME_NET $HTTP_PORTS
+  (msg:"LAB Stage3 Initial Access: HTTP request to sensitive path";
+   flow:to_server,established; content:"/"; http_uri; depth:1;
+   pcre:"/^\/(admin|login|phpmyadmin|wp-admin|\.env|\.git|config)/Ui";
+   sid:1010103; rev:11; classtype:web-application-attack; priority:2;)
+
+alert tcp any any -> $HOME_NET $HTTP_PORTS
+  (msg:"LAB Stage4 Exploit attempt: SQLi or path-traversal payload in HTTP URI";
+   flow:to_server,established;
+   pcre:"/(union[\s%+]+select|1=1|\.\.\/|\/etc\/passwd|%27|--[\s%+])/Ui";
+   sid:1010104; rev:11; classtype:web-application-attack; priority:1;)
+
+alert tcp any any -> $HOME_NET $HTTP_PORTS
+  (msg:"LAB Stage5 Exfiltration/C2: HTTP POST with automation User-Agent";
+   flow:to_server,established; content:"POST"; http_method;
+   pcre:"/(python-requests|sqlmap|curl\/|wget\/|Go-http-client|libwww-perl)/Hi";
+   sid:1010105; rev:11; classtype:trojan-activity; priority:1;)
+</pre>
+
+<div class="note">
+<strong>关于 Docker bridge 下的校验和偏移</strong>：Docker bridge 网络常把 TCP checksum 卸载给虚拟网卡，数据包到达 Snort 时 checksum 字段为 0，Snort 默认会丢弃这些包；只有 <code>nmap -sS</code> 这种自行计算 checksum 的 SYN 包能被看见。解决办法是启动 Snort 时加 <code>-k none</code> 关闭校验和验证（见下一节的 entrypoint）。
+</div>
+
+<h2>4. Wazuh 侧规则：阶段标记与跨阶段关联（<span class="path">config/wazuh_manager/rules/snort_correlation_rules.xml</span>）</h2>
+
+<p>Wazuh 的 Snort 解码器会把所有 Snort 告警统一标记成 <code>rule.id: 20101</code>。本实验在其之上再做两层规则：</p>
+<ul>
+  <li><strong>阶段标签规则</strong> <code>100360</code>–<code>100364</code>：用 <code>&lt;if_sid&gt;20101&lt;/if_sid&gt;</code> 作为基规则，通过 <code>&lt;match&gt;1:1010101:11&lt;/match&gt;</code> 等字符串在 <code>full_log</code> 中识别 SID，从而把每个阶段打上公共组 <code>snort_lab_chain</code>；<code>ignore="60"</code> 做 60 秒去抖，避免同一阶段因为多包而把频次撑爆。</li>
+  <li><strong>关联规则</strong> <code>100390</code> / <code>100391</code>：<code>&lt;if_matched_group&gt;snort_lab_chain&lt;/if_matched_group&gt;</code> + <code>&lt;same_source_ip /&gt;</code> + <code>frequency</code> + <code>timeframe="600"</code>，把同源 IP 在 10 分钟内多阶段的事件聚合为 HIGH / CRITICAL。</li>
+</ul>
+
+<pre>&lt;!--
+  Correlación SIEM lab sobre alertas Snort (rule.id=20101 del decoder snort).
+  - 100360..100364: etiqueta por etapa (dedup 60s por regla)
+  - 100390: mismo origen, &gt;=3 eventos etiqueta snort_lab_chain / 600s -&gt; HIGH
+  - 100391: mismo origen, &gt;=5 eventos etiqueta snort_lab_chain / 600s -&gt; CRITICAL
+  SIDs Snort referenciados: 1010101..1010105 rev:11
+--&gt;
+&lt;group name="snort,ids,lab,"&gt;
+
+  &lt;rule id="100360" level="5" ignore="60"&gt;
+    &lt;if_sid&gt;20101&lt;/if_sid&gt;
+    &lt;match&gt;1:1010101:11&lt;/match&gt;
+    &lt;description&gt;LAB kill-chain [1/5] Reconnaissance: ICMP echo probe detected&lt;/description&gt;
+    &lt;group&gt;snort_lab_chain,attack.recon,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;rule id="100361" level="6" ignore="60"&gt;
+    &lt;if_sid&gt;20101&lt;/if_sid&gt;
+    &lt;match&gt;1:1010102:11&lt;/match&gt;
+    &lt;description&gt;LAB kill-chain [2/5] Service Discovery: SYN probe on well-known port&lt;/description&gt;
+    &lt;group&gt;snort_lab_chain,attack.scan,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;rule id="100362" level="8" ignore="60"&gt;
+    &lt;if_sid&gt;20101&lt;/if_sid&gt;
+    &lt;match&gt;1:1010103:11&lt;/match&gt;
+    &lt;description&gt;LAB kill-chain [3/5] Initial Access: HTTP request to sensitive path&lt;/description&gt;
+    &lt;group&gt;snort_lab_chain,attack.web_probe,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;rule id="100363" level="10" ignore="60"&gt;
+    &lt;if_sid&gt;20101&lt;/if_sid&gt;
+    &lt;match&gt;1:1010104:11&lt;/match&gt;
+    &lt;description&gt;LAB kill-chain [4/5] Exploit: SQLi or path-traversal payload in HTTP request&lt;/description&gt;
+    &lt;group&gt;snort_lab_chain,attack.exploit,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;rule id="100364" level="11" ignore="60"&gt;
+    &lt;if_sid&gt;20101&lt;/if_sid&gt;
+    &lt;match&gt;1:1010105:11&lt;/match&gt;
+    &lt;description&gt;LAB kill-chain [5/5] Exfiltration/C2: HTTP POST with automation User-Agent&lt;/description&gt;
+    &lt;group&gt;snort_lab_chain,attack.exfil,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;rule id="100390" level="12" frequency="3" timeframe="600"&gt;
+    &lt;if_matched_group&gt;snort_lab_chain&lt;/if_matched_group&gt;
+    &lt;same_source_ip /&gt;
+    &lt;description&gt;LAB HIGH severity: multi-stage Snort kill-chain correlated (same source, &gt;=3 stages)&lt;/description&gt;
+    &lt;group&gt;snort_lab_correlation,attack.killchain,&lt;/group&gt;
+  &lt;/rule&gt;
+
+  &lt;rule id="100391" level="15" frequency="5" timeframe="600"&gt;
+    &lt;if_matched_group&gt;snort_lab_chain&lt;/if_matched_group&gt;
+    &lt;same_source_ip /&gt;
+    &lt;description&gt;LAB CRITICAL severity: full Snort kill-chain correlated from single source (&gt;=5 stages)&lt;/description&gt;
+    &lt;group&gt;snort_lab_correlation,attack.killchain,&lt;/group&gt;
+  &lt;/rule&gt;
+
+&lt;/group&gt;
+</pre>
+
+<p>该文件通过 <code>docker-compose.yml</code> 中 <code>./config/wazuh_manager/rules → /var/ossec/etc/rules</code> 的挂载加入 manager 容器，和官方规则一同加载。</p>
+
+<h2>5. 修改清单（文件与组件）</h2>
+
+<table>
+<thead><tr><th>文件 / 组件</th><th>类型</th><th>修改要点</th></tr></thead>
+<tbody>
+<tr>
+  <td><span class="path">docker/victim/snort-lab-chain.rules</span></td>
+  <td>新增</td>
+  <td>Snort 五阶段规则链（SID <code>1010101</code>–<code>1010105</code>，<code>rev:11</code>），HTTP 规则使用 <code>http_inspect</code> 修饰符。</td>
+</tr>
+<tr>
+  <td><span class="path">docker/victim/victim-entrypoint.sh</span></td>
+  <td>修改</td>
+  <td>① 若 <code>local.rules</code> 还没有 <code>sid:1010101</code>，把 <code>lab-chain.rules</code> 追加进去；② Snort 启动参数增加 <code>-k none</code> 关闭校验和验证；③ 用 Python 片段去重 <code>ossec.conf</code> 中的 <code>snort-alerts</code> <code>localfile</code> 块，并以 <code>snort-full</code> 格式采集 <code>/var/log/snort/alert</code>。</td>
+</tr>
+<tr>
+  <td><span class="path">docker/victim/Dockerfile</span></td>
+  <td>修改</td>
+  <td>在构建时把规则链复制到镜像内的 <code>/etc/snort/rules/lab-chain.rules</code>。</td>
+</tr>
+<tr>
+  <td><span class="path">config/wazuh_manager/rules/snort_correlation_rules.xml</span></td>
+  <td>新增</td>
+  <td>阶段标签规则 <code>100360</code>–<code>100364</code> + 关联规则 <code>100390</code>（HIGH）/ <code>100391</code>（CRITICAL）。</td>
+</tr>
+<tr>
+  <td><span class="path">scripts/run-snort-chain-scenario.sh</span></td>
+  <td>新增</td>
+  <td>攻击编排脚本，在 <code>attacker</code> 容器中依序生成五个阶段的网络流量。</td>
+</tr>
+<tr>
+  <td><span class="path">docker-compose.yml</span></td>
+  <td>既有（复用）</td>
+  <td>通过 <code>./config/wazuh_manager/rules → /var/ossec/etc/rules</code> 与 <code>./config/wazuh_manager/decoders → /var/ossec/etc/decoders</code> 的挂载，将自定义规则并入 manager；<code>victim</code> 具备 <code>cap_add: NET_ADMIN / NET_RAW</code> 以便 Snort 抓包。</td>
+</tr>
+<tr>
+  <td><span class="path">README.md</span></td>
+  <td>修改</td>
+  <td>增加“Escenario Snort: kill-chain externo contra victim”章节，表格对应阶段—SID—tag 规则；给出 Dashboard 查询样例。</td>
+</tr>
+</tbody>
+</table>
+
+<h3>5.1 <span class="path">victim-entrypoint.sh</span> 相关片段</h3>
+
+<pre># Keep exactly one snort localfile block and parse fast alerts with snort-full.
+python3 - &lt;&lt;'PY'
+from pathlib import Path
+import re
+path = Path("/var/ossec/etc/ossec.conf")
+text = path.read_text()
+pattern = re.compile(
+    r"&lt;localfile&gt;\s*&lt;log_format&gt;[^&lt;]+&lt;/log_format&gt;"
+    r"\s*&lt;location&gt;/var/log/snort/alert&lt;/location&gt;"
+    r"\s*&lt;alias&gt;snort-alerts&lt;/alias&gt;\s*&lt;/localfile&gt;\s*",
+    re.MULTILINE,
+)
+text = pattern.sub("", text)
+path.write_text(text)
+PY
+append_localfile "/var/log/snort/alert" "snort-alerts" "snort-full"
+
+# ... (agent enrollment, wazuh-control start) ...
+
+# Merge lab rules into local.rules (once per fresh container).
+if [ -f /etc/snort/rules/local.rules ] \
+   &amp;&amp; [ -f /etc/snort/rules/lab-chain.rules ] \
+   &amp;&amp; ! grep -q "sid:1010101" /etc/snort/rules/local.rules; then
+  cat /etc/snort/rules/lab-chain.rules &gt;&gt; /etc/snort/rules/local.rules
+fi
+
+# -k none: skip checksum validation. Docker bridges deliver packets with
+# TCP checksum offload delegated to hardware -&gt; Snort would drop them otherwise
+# and real HTTP traffic (curl) would not trigger any rule beyond the SYN phase.
+snort -i "${MONITOR_INTERFACE}" -A fast -k none -q \
+      -c /etc/snort/snort.conf -l /var/log/snort \
+      &gt;/var/log/snort/snort.stdout.log 2&gt;/var/log/snort/snort.stderr.log &amp;
+</pre>
+
+<h3>5.2 攻击编排脚本 <span class="path">scripts/run-snort-chain-scenario.sh</span></h3>
+
+<pre>#!/usr/bin/env bash
+set -euo pipefail
+TARGET_HOST="${1:-victim}"
+TARGET_PORT="${2:-8080}"
+banner() { printf '\n==========================\n%s\n==========================\n' "$*"; }
+
+banner "Stage 1 (Recon) — ping sweep"
+docker compose exec attacker ping -c 3 "${TARGET_HOST}" || true
+
+banner "Stage 2 (Service discovery) — nmap multi-puerto"
+docker compose exec attacker nmap -sS \
+  -p "22,80,445,3306,${TARGET_PORT}" --max-retries 1 -T4 "${TARGET_HOST}" || true
+
+banner "Stage 3 (Web probe) — rutas sensibles"
+for p in /admin /login /.env /phpmyadmin /wp-admin /config; do
+  docker compose exec attacker curl -s -o /dev/null \
+    "http://${TARGET_HOST}:${TARGET_PORT}${p}" || true
+done
+
+banner "Stage 4 (Exploit) — SQLi / path-traversal"
+docker compose exec attacker curl -s -o /dev/null \
+  "http://${TARGET_HOST}:${TARGET_PORT}/search?q=%27+OR+1=1+--+" || true
+docker compose exec attacker curl -s -o /dev/null \
+  "http://${TARGET_HOST}:${TARGET_PORT}/index?id=1+UNION+SELECT+1,2,3" || true
+docker compose exec attacker curl -s -o /dev/null \
+  "http://${TARGET_HOST}:${TARGET_PORT}/file?path=../../../etc/passwd" || true
+
+banner "Stage 5 (Exfil/C2) — POST con UA automatizada"
+for i in 1 2 3; do
+  docker compose exec attacker curl -s -o /dev/null \
+    -X POST -A "python-requests/2.28.1" \
+    -d "exfil=$(head -c 256 /dev/urandom | base64 | tr -d '\n')" \
+    "http://${TARGET_HOST}:${TARGET_PORT}/upload" || true
+done
+</pre>
+
+<h2>6. 端到端运行流程</h2>
+
+<p>一次完整的事件在系统里的流转路径：</p>
+
+<pre>attacker(容器)
+  │ ping/nmap/curl 流量
+  ▼
+eth0 (bridge 网卡, siem-lab-net)
+  │
+  ▼
+victim(容器) ── Snort 嗅探 (-k none, -A fast) ──► /var/log/snort/alert
+                                                        │
+                                                        ▼
+                                              Wazuh agent (snort-full)
+                                                        │  1514/tcp
+                                                        ▼
+                                              wazuh.manager
+                                                │   └─ decoder "snort"     → rule.id: 20101
+                                                │   └─ 100360..100364     → tag group: snort_lab_chain
+                                                │   └─ 100390/100391      → 同源 IP 关联 (HIGH/CRITICAL)
+                                                ▼
+                                              wazuh.indexer (OpenSearch)
+                                                │
+                                                ▼
+                                              wazuh.dashboard (浏览器)</pre>
+
+<h3>6.1 一次跑通实验的命令（宿主机 shell）</h3>
+
+<pre># ① 第一次部署：生成 indexer 证书（已生成可跳过）
+docker compose -f generate-indexer-certs.yml run --rm generator
+
+# ② 构建并启动全部容器
+docker compose up -d --build
+
+# ③ 确认五个容器都在运行
+docker compose ps
+
+# ④ 执行多阶段攻击脚本
+./scripts/run-snort-chain-scenario.sh
+
+# ⑤ 直接在 victim 上看 Snort 原始告警
+docker compose exec victim tail -n 120 /var/log/snort/alert
+
+# ⑥ 在 manager 上确认 Wazuh 关联规则已触发
+docker compose exec wazuh.manager bash -lc \
+  'tail -n 400 /var/ossec/logs/alerts/alerts.log | \
+   grep -E "Rule: (10036[0-4]|10039[01])" | tail -n 40'
+</pre>
+
+<h2>7. Wazuh Dashboard 验证查询</h2>
+
+<p>浏览器打开 <code>https://localhost:5602</code>（用户 <code>admin</code> / 密码 <code>SecretPassword</code>），进入 <strong>Discover</strong>，索引选 <code>wazuh-alerts-*</code>：</p>
+
+<p><strong>① 五阶段 Snort 原始命中</strong>（每个数据包一行）：</p>
+<pre>agent.name:"victim-agent"
+  AND location:"/var/log/snort/alert"
+  AND data.id:(
+    "1:1010101:11" OR "1:1010102:11" OR "1:1010103:11"
+    OR "1:1010104:11" OR "1:1010105:11"
+  )</pre>
+
+<p><strong>② 每阶段已被 Wazuh 打上标签</strong>（去抖 60 s，便于叙事）：</p>
+<pre>agent.name:"victim-agent"
+  AND rule.id:(100360 OR 100361 OR 100362 OR 100363 OR 100364)</pre>
+
+<p><strong>③ 最终关联告警（HIGH / CRITICAL）</strong>：</p>
+<pre>agent.name:"victim-agent" AND rule.id:(100390 OR 100391)</pre>
+
+<p>实际验证时，<code>100391</code>（level 15, CRITICAL）会带上 <code>Src IP: 172.20.0.6</code>（attacker）和 <code>Dst IP: 172.20.0.5:8080</code>（victim），并在正文里列出对应阶段的 Snort 原始 <code>full_log</code>，构成完整的"多步骤攻击"叙事。</p>
+
+<h2>8. 问题与排错记录</h2>
+
+<table>
+<thead><tr><th>问题</th><th>症状</th><th>解决</th></tr></thead>
+<tbody>
+<tr>
+  <td>Docker bridge 下 TCP checksum offload</td>
+  <td>只看到 <code>nmap -sS</code> 的 SYN 告警；<code>curl</code> 产生的 HTTP 请求在 Snort 里完全没有命中。</td>
+  <td>Snort 启动参数加 <code>-k none</code>，关闭校验和验证。</td>
+</tr>
+<tr>
+  <td>Wazuh 自定义规则一直不触发</td>
+  <td>只能看到默认的 <code>rule.id: 20101</code>；曾尝试 <code>&lt;field name="id"&gt;</code>（报 "field is static"）或匹配 <code>full_log</code> 中 <code>LAB Stage</code> 字符串均不稳定。</td>
+  <td>改为 <code>&lt;if_sid&gt;20101&lt;/if_sid&gt;</code> 作为基规则，并用 <code>&lt;match&gt;1:101010X:11&lt;/match&gt;</code> 精确匹配 SID 字符串。</td>
+</tr>
+<tr>
+  <td>Wazuh agent 采集 Snort 重复</td>
+  <td><code>wazuh-logcollector</code> 多次重复采集 <code>/var/log/snort/alert</code>。</td>
+  <td>在 <code>victim-entrypoint.sh</code> 中先用 Python 正则从 <code>ossec.conf</code> 里删除已有的 <code>snort-alerts</code> <code>localfile</code> 块，再统一用 <code>snort-full</code> 格式追加一条。</td>
+</tr>
+<tr>
+  <td>HTTP 规则用 <code>content:"GET "</code> 不命中</td>
+  <td>Snort 在 <code>HTTP_PORTS</code> 上启用 <code>http_inspect</code> 预处理器，内容匹配走的是规范化后的缓冲区。</td>
+  <td>规则改用 <code>content:"/"; http_uri; depth:1;</code> 和 <code>pcre:"/.../Ui"</code>（URI 缓冲区）、<code>content:"POST"; http_method;</code> 和 <code>pcre:"/.../Hi"</code>（HTTP 头）。</td>
+</tr>
+</tbody>
+</table>
+
+<hr/>
+<div class="meta">
+  报告生成：根据仓库当前状态（<code>rev:11</code>）整理。<br/>
+  关键路径索引：
+  <br/>— Snort 规则链：<span class="path">docker/victim/snort-lab-chain.rules</span>
+  <br/>— Snort 启动与日志采集：<span class="path">docker/victim/victim-entrypoint.sh</span>
+  <br/>— Wazuh 关联规则：<span class="path">config/wazuh_manager/rules/snort_correlation_rules.xml</span>
+  <br/>— 攻击编排脚本：<span class="path">scripts/run-snort-chain-scenario.sh</span>
+</div>
+
+</body>
+</html>
